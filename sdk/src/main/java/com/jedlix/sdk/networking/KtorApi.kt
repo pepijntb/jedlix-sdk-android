@@ -19,18 +19,22 @@ package com.jedlix.sdk.networking
 import com.jedlix.sdk.JedlixSDK
 import com.jedlix.sdk.networking.endpoint.EndpointNode
 import io.ktor.client.*
-import io.ktor.client.features.*
-import io.ktor.client.features.json.*
-import io.ktor.client.features.json.serializer.*
-import io.ktor.client.features.logging.*
+import io.ktor.client.plugins.HttpResponseValidator
+import io.ktor.client.plugins.HttpTimeout
+import io.ktor.client.plugins.ResponseException
+import io.ktor.client.plugins.addDefaultResponseValidation
+import io.ktor.client.plugins.contentnegotiation.ContentNegotiation
+import io.ktor.client.plugins.logging.LogLevel
+import io.ktor.client.plugins.logging.Logger
+import io.ktor.client.plugins.logging.Logging
 import io.ktor.client.request.*
 import io.ktor.client.statement.*
-import io.ktor.client.utils.*
 import io.ktor.http.*
-import io.ktor.util.*
+import io.ktor.serialization.kotlinx.json.json
 import io.ktor.utils.io.errors.*
 import kotlinx.serialization.SerializationException
 import kotlinx.serialization.builtins.serializer
+import kotlinx.serialization.json.Json
 
 internal class KtorApi(
     override val host: String,
@@ -39,7 +43,7 @@ internal class KtorApi(
     override val authentication: Authentication
 ) : Api() {
 
-    private val json = kotlinx.serialization.json.Json {
+    private val json = Json {
         isLenient = false
         ignoreUnknownKeys = true
         allowSpecialFloatingPointValues = false
@@ -48,8 +52,8 @@ internal class KtorApi(
 
     private val client: HttpClient
         get() = HttpClient {
-            install(JsonFeature) {
-                serializer = KotlinxSerializer(json)
+            install(ContentNegotiation) {
+                json(json)
             }
             install(HttpTimeout) {
                 connectTimeoutMillis = timeoutMillis
@@ -70,19 +74,19 @@ internal class KtorApi(
 
             addDefaultResponseValidation()
             HttpResponseValidator {
-                handleResponseException {
-                    throw when (it) {
+                handleResponseExceptionWithRequest { cause: Throwable, _: HttpRequest ->
+                    throw when (cause) {
                         is ResponseException -> {
-                            val response = it.response
+                            val response = cause.response
                             ApiException(
                                 response.status.value,
                                 response.request.url.fullPath,
                                 responseContentType = response.contentType()?.contentType,
                                 responseContentSubType = response.contentType()?.contentSubtype,
-                                responseBody = response.readText()
+                                responseBody = response.bodyAsText()
                             )
                         }
-                        else -> it
+                        else -> cause
                     }
                 }
             }
@@ -92,7 +96,7 @@ internal class KtorApi(
         return try {
             client.use { client ->
                 val apiHost = host
-                val response = client.request<HttpResponse> {
+                val response = client.request {
                     url {
                         this.protocol = URLProtocol.HTTPS
                         this.host = apiHost
@@ -111,7 +115,7 @@ internal class KtorApi(
                         is Method.Get -> HttpMethod.Get
                         is Method.MethodWithBody<*> -> {
                             contentType(ContentType.Application.Json)
-                            body = method.body
+                            setBody(method.body)
                             when (method) {
                                 is Method.Post<*> -> HttpMethod.Post
                                 is Method.Patch<*> -> HttpMethod.Patch
@@ -121,12 +125,12 @@ internal class KtorApi(
                         is Method.Delete -> {
                             // Api requires some body on delete requests
                             contentType(ContentType.Application.Json)
-                            body = "{}"
+                            setBody("{}")
                             HttpMethod.Delete
                         }
                         is Method.EmptyPost -> {
                             contentType(ContentType.Application.Json)
-                            body = "{}"
+                            setBody("{}")
                             HttpMethod.Post
                         }
                     }
@@ -134,7 +138,7 @@ internal class KtorApi(
 
                 val content = when (response.status) {
                     HttpStatusCode.NoContent -> json.encodeToString(Unit.serializer(), Unit)
-                    else -> response.readText()
+                    else -> response.bodyAsText()
                 }
 
                 Response.Success(
